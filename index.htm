@@ -78,10 +78,18 @@ header {
 }
 .brand-block { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .brand-title h1 { margin: 0; font-size: 19px; letter-spacing: -0.2px; }
-.status-line { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #c4ddd1; margin-top: 2px; }
+.status-line { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: #c4ddd1; margin-top: 2px; flex-wrap: wrap; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #4cd97b; flex: 0 0 auto; }
 .live-dot.warn { background: #f2b84b; }
 .live-dot.bad { background: #ff6b6b; }
+.sync-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px; border-radius: 99px; font-size: 10.5px; font-weight: 700;
+  background: #ffffff1a; color: #d8ece2; border: 1px solid #ffffff24;
+  transition: background .2s, color .2s, transform .2s;
+}
+.sync-pill.online { background: #27674980; color: #9bf6be; border-color: #4cd97b55; }
+.sync-pill.pulse { transform: scale(1.06); background: #d7b47855; color: #fff; }
 
 /* Кнопка выбора совещания на мобильном */
 #mobileMeetingBtn {
@@ -105,6 +113,9 @@ header {
 #mobileMeetingBtn .mm-sub {
   font-size: 11px; color: #c8e0d4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 5px; margin-top: 1px;
 }
+#mobileSyncDot { font-size: 11px; opacity: 0.45; transition: opacity .2s, transform .2s; }
+#mobileSyncDot.online { opacity: 1; color: #7ef2a6; }
+#mobileSyncDot.pulse { transform: scale(1.3); color: var(--gold); }
 #mobileMeetingBtn .mm-arrow { font-size: 13px; color: var(--gold); flex: 0 0 auto; font-weight: 800; }
 
 .actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
@@ -355,6 +366,10 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
 .settings-field input {
   width: 100%; padding: 10px 11px; border: 1px solid #cbd7cd; border-radius: 10px; font-size: 16px;
 }
+.sync-info-box {
+  padding: 10px 12px; border-radius: 11px; background: #eff6f1; border: 1px solid #cde0d3;
+  font-size: 12.5px; color: #204231; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
 
 #printArea { display: none; }
 #toast {
@@ -452,6 +467,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       <div class="status-line">
         <span class="live-dot" id="liveDot"></span>
         <span id="desktopStatus">Подключение к Google Таблице…</span>
+        <span class="sync-pill" id="syncPill" title="Автоматическая мгновенная синхронизация всех устройств">⟳ Синхр.…</span>
       </div>
     </div>
   </div>
@@ -459,7 +475,11 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
   <button id="mobileMeetingBtn" type="button" title="Выбрать совещание">
     <span class="mm-text">
       <span class="mm-title" id="mobileMeetingTitle">Загрузка совещаний…</span>
-      <span class="mm-sub"><span class="live-dot" id="mobileLiveDot"></span><span id="mobileMeetingSub">Автообновление 10 сек.</span></span>
+      <span class="mm-sub">
+        <span class="live-dot" id="mobileLiveDot"></span>
+        <span id="mobileSyncDot" title="Мгновенная синхронизация">⚡</span>
+        <span id="mobileMeetingSub">Автообновление 10 сек.</span>
+      </span>
     </span>
     <span class="mm-arrow">▾</span>
   </button>
@@ -505,7 +525,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       <button id="selectionCancelBtn" type="button">Отмена</button>
     </div>
 
-    <div class="muted" id="numHint">Номера — между стулом и столом (параллельно с № 1 в сторону ГД). Нажмите на любое кресло для быстрой настройки или перетащите ФИО мышью.</div>
+    <div class="muted" id="numHint">Номера — между стулом и столом (параллельно с № 1 в сторону ГД). Все изменения мгновенно синхронизируются между устройствами.</div>
 
     <div id="stageScroll">
       <div id="stageScaler">
@@ -586,8 +606,24 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
   let loading = false, localCsv = false, signature = "", pendingRender = false;
   let mobileTab = "people", zoomMode = "fit", activeSheet = null, toastTimer = 0;
 
+  // Переменные мгновенной облачной синхронизации
+  const clientId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+  let logicalClock = Date.now();
+  let ceoUpdatedAt = 0;
+  let mqttClients = [];
+  let localBus = null;
+  let publishTimer = 0;
+  let lastPublishAt = 0;
+  let seedTimer = 0;
+  let receivedCloudState = false;
+
   const isMobileScreen = () => window.matchMedia("(max-width: 900px)").matches;
   const isIOS = () => /iPhone|iPad|iPod/i.test(navigator.userAgent || "") || Boolean(navigator.standalone);
+
+  function nextClock(minVal = 0) {
+    logicalClock = Math.max(Date.now(), logicalClock, Number(minVal) || 0) + 1;
+    return logicalClock;
+  }
 
   (function load() {
     let saved = {};
@@ -596,7 +632,28 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
               JSON.parse(localStorage.getItem("meeting-seating-v2") || "null") ||
               JSON.parse(localStorage.getItem("meeting-seating-v1") || "{}") || {};
     } catch (_) {}
-    layouts = saved.layouts || {};
+    const rawLayouts = saved.layouts || {};
+    layouts = {};
+    for (const [k, v] of Object.entries(rawLayouts)) {
+      if (!v || typeof v !== "object") continue;
+      const hasEdits = Object.keys(v.equipment || {}).length > 0 ||
+                       Object.keys(v.seats || {}).length > 1 ||
+                       (Number(v.L) && Number(v.L) !== 5) ||
+                       (Number(v.R) && Number(v.R) !== 5);
+      const u = Number(v.u) || (hasEdits ? 1 : 0);
+      if (u > logicalClock) logicalClock = u;
+      layouts[k] = {
+        L: Number(v.L) || 5,
+        R: Number(v.R) || 5,
+        seats: Object.assign({}, v.seats || {}),
+        equipment: Object.assign({}, v.equipment || {}),
+        ceoAuto: Boolean(v.ceoAuto),
+        u
+      };
+    }
+    ceoUpdatedAt = Number(saved.ceoTs) || 0;
+    if (ceoUpdatedAt > logicalClock) logicalClock = ceoUpdatedAt;
+
     const sUrl = (saved.url || "").trim();
     const customValid = /\/spreadsheets\/d\/[a-zA-Z0-9_-]+/.test(sUrl) && !sUrl.includes("1P9F-tx_hOs6YXFbtlD7sgNXV7cBKa22F-EtlL3nVl2M");
     sheetUrl = customValid ? sUrl : DEFAULT_URL;
@@ -605,13 +662,27 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
     if (!isMobileScreen()) $("saveBtn").textContent = "Сохранить JPEG";
   })();
 
+  function pruneLayouts() {
+    const keys = Object.keys(layouts);
+    if (keys.length <= 80) return;
+    const activeIds = new Set(meetings.map(m => m.id));
+    const removable = keys
+      .filter(k => !activeIds.has(k))
+      .sort((a, b) => (Number(layouts[b]?.u) || 0) - (Number(layouts[a]?.u) || 0));
+    for (let i = 50; i < removable.length; i++) {
+      delete layouts[removable[i]];
+    }
+  }
+
   function persist() {
+    pruneLayouts();
     try {
       localStorage.setItem(STORE, JSON.stringify({
         layouts,
         url: sheetUrl || DEFAULT_URL,
         key: apiKey || DEFAULT_API_KEY,
-        ceo: $("ceoName").value
+        ceo: $("ceoName").value,
+        ceoTs: ceoUpdatedAt
       }));
     } catch (_) {}
   }
@@ -634,6 +705,299 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
 
   const clean = v => String(v == null ? "" : v).replace(/\s+/g, " ").trim();
   const cell = (row, i) => i < 0 ? "" : clean(row ? row[i] : "");
+
+  /* ---------- Мгновенная автоматическая синхронизация всех устройств ---------- */
+  function syncTopic() {
+    const sid = safeIdentity().id + "|" + DEFAULT_API_KEY.slice(0, 14);
+    let h1 = 0x811c9dc5, h2 = 0x01000193;
+    for (let i = 0; i < sid.length; i++) {
+      const ch = sid.charCodeAt(i);
+      h1 ^= ch; h1 = Math.imul(h1, 0x01000193);
+      h2 ^= (ch + i); h2 = Math.imul(h2, 0x85ebca6b);
+    }
+    const hex = (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
+    return "rassadka-live-v4/chan-" + hex + "/state";
+  }
+
+  function buildSyncPayload() {
+    pruneLayouts();
+    const exported = {};
+    for (const [mId, l] of Object.entries(layouts)) {
+      if (!l || typeof l !== "object") continue;
+      if ((Number(l.u) || 0) > 0) {
+        exported[mId] = {
+          L: clamp(l.L),
+          R: clamp(l.R),
+          seats: l.seats || {},
+          equipment: l.equipment || {},
+          ceoAuto: Boolean(l.ceoAuto),
+          u: Number(l.u) || 0
+        };
+      }
+    }
+    return {
+      v: 4,
+      sender: clientId,
+      ts: logicalClock,
+      ceo: $("ceoName").value,
+      ceoTs: ceoUpdatedAt,
+      layouts: exported
+    };
+  }
+
+  function updateSyncIndicator(pulse = false) {
+    const onlineCount = mqttClients.filter(c => c && c.connected).length;
+    const pill = $("syncPill");
+    const mDot = $("mobileSyncDot");
+    const settingsStatus = document.getElementById("settingsSyncStatus");
+
+    if (onlineCount > 0) {
+      pill.textContent = "⚡ Синхр. онлайн";
+      pill.classList.add("online");
+      mDot.classList.add("online");
+      if (settingsStatus) settingsStatus.textContent = "Активна ⚡ (все устройства синхронизируются мгновенно)";
+    } else {
+      pill.textContent = navigator.onLine === false ? "Офлайн" : "⟳ Синхр.…";
+      pill.classList.remove("online");
+      mDot.classList.remove("online");
+      if (settingsStatus) settingsStatus.textContent = navigator.onLine === false ? "Ожидание интернета…" : "Подключение к облаку…";
+    }
+
+    if (pulse) {
+      pill.classList.add("pulse");
+      mDot.classList.add("pulse");
+      setTimeout(() => {
+        pill.classList.remove("pulse");
+        mDot.classList.remove("pulse");
+      }, 380);
+    }
+  }
+
+  function publishNow() {
+    clearTimeout(publishTimer);
+    publishTimer = 0;
+    lastPublishAt = Date.now();
+    persist();
+    const raw = JSON.stringify(buildSyncPayload());
+    const topic = syncTopic();
+
+    if (localBus) {
+      try { localBus.postMessage(raw); } catch (_) {}
+    }
+    mqttClients.forEach(cl => {
+      try {
+        if (cl && cl.connected) {
+          cl.publish(topic, raw, {qos: 1, retain: true});
+        }
+      } catch (_) {}
+    });
+    updateSyncIndicator(true);
+  }
+
+  function schedulePublish() {
+    const elapsed = Date.now() - lastPublishAt;
+    if (elapsed >= 120) {
+      publishNow();
+    } else if (!publishTimer) {
+      publishTimer = setTimeout(publishNow, 120 - elapsed);
+    }
+  }
+
+  function commitLayoutChange(l) {
+    if (!l) return;
+    l.u = nextClock(l.u);
+    schedulePublish();
+  }
+
+  function commitCeoChange() {
+    ceoUpdatedAt = nextClock(ceoUpdatedAt);
+    schedulePublish();
+  }
+
+  function applyIncomingState(raw, fromCloud = false) {
+    let msg = raw;
+    if (typeof raw === "string") {
+      try { msg = JSON.parse(raw); } catch (_) { return; }
+    }
+    if (!msg || msg.v !== 4) return;
+    if (fromCloud) receivedCloudState = true;
+    if (msg.sender === clientId) return;
+
+    if (Number(msg.ts) > logicalClock) logicalClock = Number(msg.ts);
+
+    let changed = false;
+    let localHasNewer = false;
+
+    const incCeoTs = Number(msg.ceoTs) || 0;
+    if (incCeoTs > ceoUpdatedAt && typeof msg.ceo === "string") {
+      $("ceoName").value = msg.ceo;
+      ceoUpdatedAt = incCeoTs;
+      if (incCeoTs > logicalClock) logicalClock = incCeoTs;
+      changed = true;
+    } else if (ceoUpdatedAt > incCeoTs && ceoUpdatedAt > 1) {
+      localHasNewer = true;
+    }
+
+    const incLayouts = msg.layouts || {};
+    for (const [mId, incL] of Object.entries(incLayouts)) {
+      if (!incL || typeof incL !== "object") continue;
+      const incU = Number(incL.u) || 0;
+      if (incU > logicalClock) logicalClock = incU;
+      const locL = layouts[mId];
+      const locU = locL ? (Number(locL.u) || 0) : -1;
+
+      if (incU > locU) {
+        layouts[mId] = {
+          L: clamp(incL.L),
+          R: clamp(incL.R),
+          seats: Object.assign({}, incL.seats || {}),
+          equipment: Object.assign({}, incL.equipment || {}),
+          ceoAuto: Boolean(incL.ceoAuto),
+          u: incU
+        };
+        changed = true;
+      } else if (locU > incU && locU > 1) {
+        localHasNewer = true;
+      }
+    }
+
+    if (fromCloud) {
+      for (const [mId, locL] of Object.entries(layouts)) {
+        const locU = Number(locL?.u) || 0;
+        if (locU > 1 && !incLayouts[mId]) {
+          localHasNewer = true;
+          break;
+        }
+      }
+    }
+
+    if (changed) {
+      persist();
+      updateSyncIndicator(true);
+      if (drag) pendingRender = true;
+      else render();
+    }
+    if (fromCloud && localHasNewer) {
+      schedulePublish();
+    }
+  }
+
+  function loadScriptWithFallback(urls) {
+    return new Promise((resolve, reject) => {
+      if (window.mqtt) return resolve(window.mqtt);
+      let idx = 0;
+      const next = () => {
+        if (idx >= urls.length) return reject(new Error("MQTT CDN недоступен"));
+        const s = document.createElement("script");
+        s.src = urls[idx++];
+        s.async = true;
+        s.onload = () => window.mqtt ? resolve(window.mqtt) : next();
+        s.onerror = next;
+        document.head.appendChild(s);
+      };
+      next();
+    });
+  }
+
+  function initRealtimeSync() {
+    // Мгновенная синхронизация между вкладками одного браузера
+    try {
+      if ("BroadcastChannel" in window) {
+        localBus = new BroadcastChannel("rassadka_bus_v4");
+        localBus.onmessage = e => applyIncomingState(e.data, false);
+      }
+    } catch (_) {}
+
+    window.addEventListener("storage", e => {
+      if (e.key === STORE && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (parsed) {
+            applyIncomingState({
+              v: 4,
+              sender: "storage",
+              ts: Date.now(),
+              ceo: parsed.ceo,
+              ceoTs: parsed.ceoTs || 0,
+              layouts: parsed.layouts || {}
+            }, false);
+          }
+        } catch (_) {}
+      }
+    });
+
+    // Мгновенная облачная синхронизация через независимые WSS MQTT-брокеры (включая порт 443)
+    const cdns = [
+      "https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js",
+      "https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js",
+      "https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"
+    ];
+    const brokers = [
+      "wss://broker.emqx.io:8084/mqtt",
+      "wss://mqtt.eclipseprojects.io:443/mqtt",
+      "wss://broker.hivemq.com:8884/mqtt"
+    ];
+
+    loadScriptWithFallback(cdns).then(mqttLib => {
+      const topic = syncTopic();
+      brokers.forEach((brokerUrl, i) => {
+        try {
+          const cl = mqttLib.connect(brokerUrl, {
+            clientId: "rsd4_" + clientId + "_" + i,
+            clean: true,
+            keepalive: 28,
+            reconnectPeriod: 3500,
+            connectTimeout: 9000,
+            protocolVersion: 4
+          });
+          mqttClients.push(cl);
+
+          cl.on("connect", () => {
+            updateSyncIndicator(false);
+            cl.subscribe(topic, {qos: 1}, err => {
+              if (!err && !seedTimer) {
+                // Если на этом устройстве уже есть сохранённые правки, а облако пустое — отправляем их
+                seedTimer = setTimeout(() => {
+                  const hasLocalEdits = Object.values(layouts).some(x => (Number(x?.u) || 0) > 0) || ceoUpdatedAt > 0;
+                  if (!receivedCloudState && hasLocalEdits) publishNow();
+                }, 1600);
+              }
+            });
+          });
+
+          cl.on("message", (t, payload) => {
+            if (t !== topic) return;
+            try {
+              const str = typeof payload === "string" ? payload : new TextDecoder().decode(payload);
+              applyIncomingState(str, true);
+            } catch (_) {}
+          });
+
+          cl.on("close", () => updateSyncIndicator(false));
+          cl.on("offline", () => updateSyncIndicator(false));
+          cl.on("error", () => {});
+        } catch (_) {}
+      });
+    }).catch(() => updateSyncIndicator(false));
+
+    // Пробуждение на iPhone после блокировки экрана или сворачивания PWA
+    const wakeUp = () => {
+      if (document.visibilityState === "hidden") return;
+      const topic = syncTopic();
+      mqttClients.forEach(cl => {
+        try {
+          if (cl.connected) cl.subscribe(topic, {qos: 1});
+          else cl.reconnect();
+        } catch (_) {}
+      });
+      updateSyncIndicator(false);
+      refresh(false);
+    };
+    document.addEventListener("visibilitychange", wakeUp);
+    window.addEventListener("pageshow", wakeUp);
+    window.addEventListener("online", wakeUp);
+    window.addEventListener("offline", () => updateSyncIndicator(false));
+  }
 
   /* ---------- Чтение Google Таблицы ---------- */
   function csvParse(text) {
@@ -825,12 +1189,13 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
 
   function layout() {
     if (!current) return null;
-    if (!layouts[current.id]) layouts[current.id] = {L: 5, R: 5, seats: {}, equipment: {}, ceoAuto: false};
+    if (!layouts[current.id]) layouts[current.id] = {L: 5, R: 5, seats: {}, equipment: {}, ceoAuto: false, u: 0};
     const l = layouts[current.id];
     l.L = clamp(l.L);
     l.R = clamp(l.R);
     l.seats = l.seats || {};
     l.equipment = l.equipment || {};
+    l.u = Number(l.u) || 0;
     const all = members(current), valid = {};
     all.forEach(p => { valid[p.id] = 1; });
     for (const seat of Object.keys(l.seats)) {
@@ -914,7 +1279,10 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       e.stopPropagation();
       if (selected && selected.type === "device" && selected.id === d.id) {
         const l = layout();
-        if (l) delete l.equipment[d.id];
+        if (l) {
+          delete l.equipment[d.id];
+          commitLayoutChange(l);
+        }
         selected = null;
         render();
         toast("Снято: " + d.label);
@@ -1117,6 +1485,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
           xBtn.onclick = e => {
             e.stopPropagation();
             delete l.equipment[d.id];
+            commitLayoutChange(l);
             if (isSel) selected = null;
             render();
             toast("Снято: " + d.label);
@@ -1380,6 +1749,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       freeBtn.type = "button";
       freeBtn.onclick = () => {
         delete l.seats[seatKey];
+        commitLayoutChange(l);
         closeSheet();
         render();
         toast("Место освобождено");
@@ -1404,6 +1774,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
         btn.onclick = () => {
           if (isMine) delete l.equipment[d.id];
           else l.equipment[d.id] = occupant.id;
+          commitLayoutChange(l);
           render();
         };
         eqGrid.appendChild(btn);
@@ -1494,12 +1865,21 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
   function openSettingsSheet() {
     const body = openSheet("Параметры приложения", $("desktopStatus").textContent, {type: "settings"});
 
+    const syncBox = make("div", "sync-info-box");
+    const onlineCount = mqttClients.filter(c => c && c.connected).length;
+    const syncText = make("span", "", "Облачная синхронизация: ");
+    const syncState = make("strong", "", onlineCount > 0 ? "Активна ⚡ (все устройства синхронизируются мгновенно)" : "Подключение к облаку…");
+    syncState.id = "settingsSyncStatus";
+    syncText.appendChild(syncState);
+    syncBox.appendChild(syncText);
+    body.appendChild(syncBox);
+
     const ceoLabel = make("label", "settings-field", "ФИО генерального директора (если нет в таблице)");
     const ceoInp = make("input");
     ceoInp.value = $("ceoName").value;
     ceoInp.onchange = () => {
       $("ceoName").value = ceoInp.value;
-      persist();
+      commitCeoChange();
       render();
     };
     ceoLabel.appendChild(ceoInp);
@@ -1516,7 +1896,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
     row.appendChild(csvB);
     body.appendChild(row);
 
-    const info = make("p", "muted", "Подключено автоматически к постоянной Google Таблице совещаний (актуализация каждые 10 секунд). На iPhone используйте меню Safari «Поделиться → На экран Домой» для работы в полноэкранном режиме.");
+    const info = make("p", "muted", "Подключено автоматически к постоянной Google Таблице совещаний (актуализация каждые 10 секунд). Любые изменения рассадки мгновенно передаются на все открытые устройства.");
     info.style.margin = "0";
     body.appendChild(info);
   }
@@ -1578,6 +1958,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       if (from !== seatKey) {
         if (from) delete l.seats[from];
         l.seats[seatKey] = data.id;
+        commitLayoutChange(l);
       }
     } else if (data.type === "device") {
       const okD = devices.some(d => d.id === data.id);
@@ -1585,7 +1966,10 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
         toast("Сначала посадите участника на это кресло");
         return endDrag();
       }
-      l.equipment[data.id] = l.seats[seatKey];
+      if (l.equipment[data.id] !== l.seats[seatKey]) {
+        l.equipment[data.id] = l.seats[seatKey];
+        commitLayoutChange(l);
+      }
       toast("Оборудование закреплено");
     }
     selected = null;
@@ -1600,7 +1984,10 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
     if (!l) return endDrag();
     if (!devices.some(d => d.id === did)) return endDrag();
     if (!members(current).some(p => p.id === pid)) return endDrag();
-    l.equipment[did] = pid;
+    if (l.equipment[did] !== pid) {
+      l.equipment[did] = pid;
+      commitLayoutChange(l);
+    }
     toast("Оборудование закреплено");
     selected = null;
     pendingRender = false;
@@ -1612,10 +1999,20 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
   function returnDrop(data) {
     const l = layout();
     if (l && data) {
+      let modified = false;
       if (data.type === "person") {
-        for (const s of Object.keys(l.seats)) if (l.seats[s] === data.id) delete l.seats[s];
+        for (const s of Object.keys(l.seats)) {
+          if (l.seats[s] === data.id) {
+            delete l.seats[s];
+            modified = true;
+          }
+        }
       }
-      if (data.type === "device") delete l.equipment[data.id];
+      if (data.type === "device" && l.equipment[data.id]) {
+        delete l.equipment[data.id];
+        modified = true;
+      }
+      if (modified) commitLayoutChange(l);
     }
     selected = null;
     pendingRender = false;
@@ -1638,6 +2035,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       const l = layout();
       if (l && l.equipment[selected.id]) {
         delete l.equipment[selected.id];
+        commitLayoutChange(l);
         selected = null;
         render();
         toast("Оборудование снято");
@@ -1650,12 +2048,16 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       const l = layout();
       if (!l) return;
       const side = btn.getAttribute("data-side");
-      l[side] = clamp(l[side] + Number(btn.getAttribute("data-change")));
-      render();
+      const nextVal = clamp(l[side] + Number(btn.getAttribute("data-change")));
+      if (nextVal !== l[side]) {
+        l[side] = nextVal;
+        commitLayoutChange(l);
+        render();
+      }
     };
   });
 
-  // Сброс через удобную шторку (работает идеально и в iOS PWA, и на ПК)
+  // Сброс через удобную шторку (синхронизируется мгновенно на все устройства)
   $("resetBtn").onclick = () => {
     const l = layout();
     if (!l || !current) return;
@@ -1673,6 +2075,8 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
       l.seats = {};
       l.equipment = {};
       l.ceoAuto = false;
+      layout();
+      commitLayoutChange(l);
       selected = null;
       closeSheet();
       render();
@@ -1725,7 +2129,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
     }).catch(err => status("Ошибка CSV: " + err.message, "bad"));
     e.target.value = "";
   };
-  $("ceoName").onchange = () => { persist(); render(); };
+  $("ceoName").onchange = () => { commitCeoChange(); render(); };
 
   let rz = 0;
   window.addEventListener("resize", () => {
@@ -1999,6 +2403,7 @@ body.drag-device .dock, body.has-selected-device .dock { background: #fff8ea99; 
   } catch (_) {}
 
   render();
+  initRealtimeSync();
   refresh(true);
   setInterval(refresh, REFRESH_MS);
 })();
